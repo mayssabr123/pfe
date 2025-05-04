@@ -1,23 +1,88 @@
-from django.contrib.auth.hashers import make_password
-from django.contrib.auth import login, authenticate, logout
-from django.contrib.auth.forms import PasswordChangeForm
-from django.contrib.auth.models import User
-from contextlib import suppress
-from django.utils import timezone
-from django.contrib.auth.hashers import check_password
-from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes, parser_classes
-from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
-
-from .models import UserProfile, AdminProfile
-from .serializers import UserProfileSerializer, AdminProfileSerializer
 import json
 import uuid
-# Constants
-MODE_MANUAL = 0
-MODE_AUTOMATIC = 1
+from django.utils import timezone
+from django.contrib.auth.hashers import check_password
+
+from rest_framework.decorators import api_view, permission_classes, parser_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
+from rest_framework.response import Response
+from rest_framework import status
+from .models import UserProfile
+from .serializers import UserProfileSerializer
+from .models import Salle
+from automation.models import AutomationLog
+from .serializers import SalleSerializer
+from django.contrib.auth.hashers import make_password
+
+from automation.mqtt_client import publish_mqtt_message  # Importez uniquement la fonction
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def control_all_devices(request):
+    try:
+        data = request.data
+        action = data.get("action")  # "ON" ou "OFF"
+        device = data.get("device")  # "clim", "chauf", ou "lamp"
+        location = data.get("location")  # 👈 Utilisé par défaut
+        name = data.get("name")      # 👈 Nouveau champ optionnel
+
+        if not action or action not in ["ON", "OFF"]:
+            return Response({"error": "Action invalide."}, status=400)
+
+        if not device or device not in ["clim", "chauf", "lamp", "power"]:
+            return Response({"error": "Appareil invalide."}, status=400)
+
+        # Définir une localisation à partir de `name` si `location` manque
+        final_location = location if location is not None else name
+        if not final_location:
+            return Response({"error": "Localisation requise."}, status=400)
+
+        topic = f"control/{device}"
+        publish_mqtt_message(topic, action)  # Envoyer la commande MQTT
+
+        # 📝 Gestion des logs
+        log_action = f"{device} {action}"
+        reason = "Commande manuelle"
+
+        if action == "ON":
+            # Créer un nouveau log pour ON
+            AutomationLog(
+                action=log_action,
+                reason=reason,
+                value=1,
+                location=final_location,
+                device=device,
+                timestamp=timezone.now()
+            ).save()
+            print(f"[AUTOMATION] {log_action} envoyé pour {final_location}.")
+
+        elif action == "OFF":
+
+            # Optionnel : enregistrer quand même l'off sans correspondance ON
+            AutomationLog(
+                action=log_action,
+                reason=reason,
+                value=0,
+                location=final_location,
+                device=device,
+                timestamp=timezone.now()
+            ).save()
+
+        return Response({
+            "message": f"Commande {action} envoyée pour {device}.",
+            "topic": topic,
+            "action": action,
+            "location_used": final_location
+        }, status=200)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
 
 
 @api_view(['POST'])
@@ -26,58 +91,55 @@ MODE_AUTOMATIC = 1
 def register(request):
     try:
         data = request.data
+
         username = data.get('username', '').strip()
         email = data.get('email', '').strip()
-        password = data.get('password')
+        password = data.get('password', '').strip()
         location = data.get('location', '').strip()
 
-        # Vérification des champs obligatoires
-        if not username or not email or not password or not location:
-            return Response(
-                {'error': 'Tous les champs requis ne sont pas fournis.'},
-                status=400
-            )
+        # Validation des champs obligatoires
+        if not all([username, email, password, location]):
+            return Response({
+                'error': 'Tous les champs (username, email, password, location) sont requis.'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Vérification d'unicité
+        # Vérification de l'unicité du username et de l'email
         if UserProfile.objects(username=username).first():
-            return Response(
-                {'error': 'Ce nom d’utilisateur existe déjà.'},
-                status=400
-            )
+            return Response({'error': 'Ce nom d’utilisateur existe déjà.'}, status=status.HTTP_400_BAD_REQUEST)
+
         if UserProfile.objects(email=email).first():
-            return Response(
-                {'error': 'Cet email est déjà utilisé.'},
-                status=400
-            )
+            return Response({'error': 'Cet email est déjà utilisé.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Hachage du mot de passe
-        hashed_password = make_password(password)
-
-        # Création et sauvegarde de l'utilisateur
+        # Création de l'utilisateur
         user = UserProfile(
             user_id=str(uuid.uuid4()),
             username=username,
             email=email,
-            password=hashed_password,
             location=location,
             date_joined=timezone.now(),
             is_active=True,
-            mode=0,
+            mode=0,  # Par défaut manuel
             role='user'
         )
+        user.set_password(password)  # Hacher le mot de passe
         user.save()
 
-        return Response(
-            {'message': 'Utilisateur enregistré avec succès.'},
-            status=201
-        )
+        return Response({
+            'message': 'Utilisateur enregistré avec succès.',
+            'user': {
+                'username': user.username,
+                'email': user.email,
+                'location': user.location,
+                'mode': user.mode,
+                'role': user.role
+            }
+        }, status=status.HTTP_201_CREATED)
 
     except Exception as e:
-        print(f"Erreur lors de l’enregistrement: {e}")
-        return Response(
-            {'error': 'Erreur interne du serveur.'},
-            status=500
-        )
+        logger.error(f"[ERREUR REGISTER] {str(e)}")
+        return Response({
+            'error': 'Erreur interne du serveur.'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -85,7 +147,6 @@ def register(request):
 @parser_classes([JSONParser, FormParser, MultiPartParser])
 def login_view(request):
     try:
-        # Lecture des données selon le type de contenu
         if request.content_type == 'application/json':
             try:
                 data = request.data
@@ -109,7 +170,6 @@ def login_view(request):
                 'message': 'Nom d\'utilisateur et mot de passe requis.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Rechercher le profil utilisateur MongoEngine
         try:
             user_profile = UserProfile.objects.get(username=username)
         except UserProfile.DoesNotExist:
@@ -118,14 +178,16 @@ def login_view(request):
                 'message': 'Nom d\'utilisateur ou mot de passe incorrect.'
             }, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Vérifier le mot de passe
         if not check_password(password, user_profile.password):
             return Response({
                 'status': 'error',
                 'message': 'Nom d\'utilisateur ou mot de passe incorrect.'
             }, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Mise à jour du dernier login
+        # 👉 Stocker le username dans la session
+        request.session['username'] = username
+
+        # Mettre à jour le dernier login
         user_profile.update_last_login()
         serializer = UserProfileSerializer(user_profile)
 
@@ -143,440 +205,285 @@ def login_view(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def logout_view(request):
-    logout(request)
-    return Response({
-        'status': 'success',
-        'message': 'Déconnexion réussie'
-    })
+    request.session.flush()
+    return Response({'message': 'Déconnexion réussie'})
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@parser_classes([JSONParser, FormParser, MultiPartParser])
-def change_password(request):
+@permission_classes([AllowAny])
+def change_mode(request):
     try:
+        # Vérifie si l'utilisateur est connecté via session
+        username = request.session.get('username')
+        if not username:
+            return Response({'error': 'Utilisateur non connecté.'}, status=403)
 
-        if request.content_type == 'application/json':
-            try:
-                data = request.data
-            except Exception:
+        data = request.data
+        new_mode = data.get('mode')  # ex: 0 = manuel, 1 = auto
+        location = data.get('location')  # optionnel si multi-zones
 
-                try:
-                    data = json.loads(request.body.decode('utf-8'))
-                except Exception:
-                    return Response({
-                        'status': 'error',
-                        'message': 'Format JSON invalide. Assurez-vous d\'utiliser des guillemets doubles pour les noms de propriétés.'
-                    }, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            data = request.POST
+        if new_mode not in [0, 1]:
+            return Response({'error': 'Mode invalide (doit être 0 ou 1).'}, status=400)
 
-        form = PasswordChangeForm(request.user, data)
-        if form.is_valid():
-            user = form.save()
-            login(request, user)
-            return Response({
-                'status': 'success',
-                'message': 'Mot de passe modifié avec succès'
-            })
+        try:
+            user = UserProfile.objects.get(username=username)
+        except UserProfile.DoesNotExist:
+            return Response({'error': 'Utilisateur non trouvé.'}, status=404)
+
+        # Vérifie que la localisation correspond à l’utilisateur
+        if location and user.location != location:
+            return Response({'error': 'Localisation non autorisée pour cet utilisateur.'}, status=403)
+
+        # Change le mode
+        user.mode = new_mode
+        user.save()
+
         return Response({
-            'status': 'error',
-            'errors': form.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
+            'message': 'Mode changé avec succès.',
+            'username': user.username,
+            'mode': user.mode,
+            'location': user.location
+        })
+
     except Exception as e:
-        return Response({
-            'status': 'error',
-            'message': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'error': f'Erreur serveur : {str(e)}'}, status=500)
 
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def get_profile(request):
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def create_salle(request):
     try:
-        user_profile = UserProfile.objects.get(user_id=str(request.user.id))
-        serializer = UserProfileSerializer(user_profile)
-        return Response(serializer.data)
-    except UserProfile.DoesNotExist:
-        return Response({
-            'status': 'error',
-            'message': 'Profil utilisateur non trouvé'
-        }, status=status.HTTP_404_NOT_FOUND)
-    except Exception as e:
-        return Response({
-            'status': 'error',
-            'message': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['PUT'])
-@permission_classes([IsAuthenticated])
-@parser_classes([JSONParser, FormParser, MultiPartParser])
-def update_profile(request):
-    try:
-        user_profile = UserProfile.objects.get(user_id=str(request.user.id))
-        serializer = UserProfileSerializer(user_profile, data=request.data, partial=True)
+        data = request.data
+        serializer = SalleSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
             return Response({
-                'status': 'success',
-                'message': 'Profil mis à jour avec succès',
-                'user': serializer.data
-            })
-        return Response({
-            'status': 'error',
-            'errors': serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-    except UserProfile.DoesNotExist:
-        return Response({
-            'status': 'error',
-            'message': 'Profil utilisateur non trouvé'
-        }, status=status.HTTP_404_NOT_FOUND)
+                'message': 'Salle créée avec succès.',
+                'salle': serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_all_salles(request):
+    try:
+        salles = Salle.objects.all()
+        serializer = SalleSerializer(salles, many=True)
         return Response({
-            'status': 'error',
-            'message': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-MODE_MANUAL = 0
-MODE_AUTOMATIC = 1
+            'message': 'Liste des salles récupérée avec succès.',
+            'salles': serializer.data
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
-@permission_classes([AllowAny])  # N'importe qui peut changer (tu peux adapter)
-def changer_mode(request):
+@permission_classes([AllowAny])
+def update_salle_mode(request):
     try:
-        username = request.data.get("username")  # on passe le username manuellement
-        mode = request.data.get("mode")
+        data = request.data
+        name = data.get('name')
+        new_mode = data.get('mode')
 
-        if not username or not mode:
-            return Response({"error": "Champs requis manquants."}, status=400)
+        if new_mode not in [0, 1]:
+            return Response({'error': 'Mode invalide (doit être 0 ou 1).'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if mode not in ["auto", "manuel"]:
-            return Response({"error": "Mode invalide"}, status=400)
-
-        # Récupérer le profil utilisateur via username
-        user_profile = UserProfile.objects.get(username=username)
-
-        # Mettre à jour le mode
-        user_profile.mode = 1 if mode == "auto" else 0
-        user_profile.save()
-        return Response({"message": f"Mode changé en {mode} pour {username}"})
-
-    except UserProfile.DoesNotExist:
-        return Response({"error": "Profil utilisateur introuvable."}, status=404)
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def is_admin(request):
-    """
-    Vérifie si l'utilisateur est un administrateur
-    """
-    try:
-        admin_profile = AdminProfile.objects.get(user_id=str(request.user.id))
-        return Response({
-            'status': 'success',
-            'is_admin': True,
-            'is_superuser': admin_profile.is_superuser
-        })
-    except AdminProfile.DoesNotExist:
-        return Response({
-            'status': 'success',
-            'is_admin': False
-        })
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def admin_login(request):
-    """
-    Connexion pour les administrateurs
-    """
-    try:
-        # Récupérer les données de la requête
-        if request.content_type == 'application/json':
-            try:
-                data = request.data
-            except Exception:
-                # Si le parsing JSON échoue, essayer de parser manuellement
-                try:
-                    data = json.loads(request.body.decode('utf-8'))
-                except Exception:
-                    return Response({
-                        'status': 'error',
-                        'message': 'Format JSON invalide. Assurez-vous d\'utiliser des guillemets doubles pour les noms de propriétés.'
-                    }, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            data = request.POST
-
-        username = data.get('username')
-        password = data.get('password')
-
-        if not username or not password:
-            return Response({
-                'status': 'error',
-                'message': 'Nom d\'utilisateur et mot de passe requis'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        user = authenticate(request, username=username, password=password)
-        if user is not None:
-            # Vérifier si l'utilisateur est un administrateur
-            try:
-                admin_profile = AdminProfile.objects.get(user_id=str(user.id))
-                login(request, user)
-                # Mettre à jour le dernier login
-                admin_profile.update_last_login()
-                serializer = AdminProfileSerializer(admin_profile)
-                return Response({
-                    'status': 'success',
-                    'message': 'Connexion réussie',
-                    'admin': serializer.data
-                })
-            except AdminProfile.DoesNotExist:
-                return Response({
-                    'status': 'error',
-                    'message': 'Vous n\'avez pas les droits d\'administrateur'
-                }, status=status.HTTP_403_FORBIDDEN)
-        return Response({
-            'status': 'error',
-            'message': 'Nom d\'utilisateur ou mot de passe incorrect'
-        }, status=status.HTTP_401_UNAUTHORIZED)
-    except Exception as e:
-        return Response({
-            'status': 'error',
-            'message': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def list_users(request):
-    """
-    Liste tous les utilisateurs (réservé aux administrateurs)
-    """
-    try:
-        # Vérifier si l'utilisateur est un administrateur
-        admin_profile = AdminProfile.objects.get(user_id=str(request.user.id))
-
-        # Récupérer tous les profils utilisateurs
-        user_profiles = UserProfile.objects.all()
-        serializer = UserProfileSerializer(user_profiles, many=True)
-
-        return Response({
-            'status': 'success',
-            'users': serializer.data
-        })
-    except AdminProfile.DoesNotExist:
-        return Response({
-            'status': 'error',
-            'message': 'Vous n\'avez pas les droits d\'administrateur'
-        }, status=status.HTTP_403_FORBIDDEN)
-    except Exception as e:
-        return Response({
-            'status': 'error',
-            'message': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['GET', 'PUT', 'DELETE'])
-@permission_classes([IsAuthenticated])
-def manage_user(request, user_id):
-    """
-    Gérer un utilisateur spécifique (réservé aux administrateurs)
-    """
-    try:
-        # Vérifier si l'utilisateur est un administrateur
-        admin_profile = AdminProfile.objects.get(user_id=str(request.user.id))
-
-        # Récupérer le profil utilisateur
         try:
-            user_profile = UserProfile.objects.get(user_id=user_id)
-        except UserProfile.DoesNotExist:
-            return Response({
-                'status': 'error',
-                'message': 'Utilisateur non trouvé'
-            }, status=status.HTTP_404_NOT_FOUND)
+            salle = Salle.objects.get(name=name)
+        except Salle.DoesNotExist:
+            return Response({'error': 'Salle non trouvée.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # GET: Récupérer les informations de l'utilisateur
-        if request.method == 'GET':
-            serializer = UserProfileSerializer(user_profile)
-            return Response({
-                'status': 'success',
-                'user': serializer.data
-            })
-
-        # PUT: Mettre à jour les informations de l'utilisateur
-        elif request.method == 'PUT':
-            serializer = UserProfileSerializer(user_profile, data=request.data, partial=True)
-            if serializer.is_valid():
-                serializer.save()
-                return Response({
-                    'status': 'success',
-                    'message': 'Utilisateur mis à jour avec succès',
-                    'user': serializer.data
-                })
-            return Response({
-                'status': 'error',
-                'errors': serializer.errors
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        # DELETE: Supprimer l'utilisateur
-        elif request.method == 'DELETE':
-            # Supprimer l'utilisateur Django
-            with suppress(User.DoesNotExist):
-                user = User.objects.get(id=user_id)
-                user.delete()
-
-            # Supprimer le profil utilisateur
-            user_profile.delete()
-
-            return Response({
-                'status': 'success',
-                'message': 'Utilisateur supprimé avec succès'
-            })
-
-    except AdminProfile.DoesNotExist:
+        salle.set_mode(new_mode)
+        serializer = SalleSerializer(salle)
         return Response({
-            'status': 'error',
-            'message': 'Vous n\'avez pas les droits d\'administrateur'
-        }, status=status.HTTP_403_FORBIDDEN)
+            'message': 'Mode de la salle mis à jour avec succès.',
+            'salle': serializer.data
+        }, status=status.HTTP_200_OK)
     except Exception as e:
-        return Response({
-            'status': 'error',
-            'message': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def list_devices(request):
-    """
-    Liste tous les appareils (réservé aux administrateurs)
-    """
+@permission_classes([AllowAny])  # Autorise tout le monde à accéder à cette vue
+def get_all_users(request):
     try:
-        # Vérifier si l'utilisateur est un administrateur
-        admin_profile = AdminProfile.objects.get(user_id=str(request.user.id))
+        # Récupérer tous les utilisateurs depuis la base de données
+        users = UserProfile.objects.all()
 
-        # Importer les modèles nécessaires
-        from automation.models import SensorData
+        # Sérialiser les données des utilisateurs
+        serializer = UserProfileSerializer(users, many=True)
 
-        # Récupérer tous les appareils uniques
-        devices = SensorData.objects.distinct('sensor_id')
-
-        # Préparer les données
-        device_list = []
-        for device_id in devices:
-            # Récupérer les dernières données pour cet appareil
-            latest_data = SensorData.objects(sensor_id=device_id).order_by('-timestamp').first()
-
-            device_info = {
-                'sensor_id': device_id,
-                'type': latest_data.type if latest_data else 'Unknown',
-                'location': latest_data.location if latest_data else 'Unknown',
-                'last_update': latest_data.timestamp if latest_data else None,
-                'status': 'active' if latest_data else 'inactive'
-            }
-
-            device_list.append(device_info)
-
+        # Retourner les données sous forme de réponse JSON
         return Response({
-            'status': 'success',
-            'devices': device_list
-        })
-    except AdminProfile.DoesNotExist:
-        return Response({
-            'status': 'error',
-            'message': 'Vous n\'avez pas les droits d\'administrateur'
-        }, status=status.HTTP_403_FORBIDDEN)
+            "message": "Liste des utilisateurs récupérée avec succès.",
+            "users": serializer.data
+        }, status=status.HTTP_200_OK)
+
     except Exception as e:
+        # Gestion des erreurs
         return Response({
-            'status': 'error',
-            'message': str(e)
+            "error": f"Erreur serveur : {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-@api_view(['GET', 'PUT'])
-@permission_classes([IsAuthenticated])
-def manage_device(request, device_id):
-    """
-    Gérer un appareil spécifique (réservé aux administrateurs)
-    """
+@api_view(['POST'])  # Vous pouvez également utiliser 'PUT'
+@permission_classes([AllowAny])  # Autorise tout le monde à accéder à cette vue
+def update_user_salle(request):
     try:
-        # Vérifier si l'utilisateur est un administrateur
-        admin_profile = AdminProfile.objects.get(user_id=str(request.user.id))
+        # Récupérer les données JSON envoyées dans la requête
+        data = request.data
+        user_id = data.get("user_id")  # Contiendra ici l'email de l'utilisateur
+        new_location = data.get("location")  # Nouvelle salle
 
-        # Importer les modèles nécessaires
-        from automation.models import SensorData
+        # Validation des champs
+        if not user_id:
+            return Response(
+                {"error": "Champ 'user_id' (email) manquant."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        # Récupérer les données de l'appareil
-        device_data = SensorData.objects(sensor_id=device_id).order_by('-timestamp')
+        if not new_location:
+            return Response(
+                {"error": "Champ 'location' manquant."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        if not device_data:
-            return Response({
-                'status': 'error',
-                'message': 'Appareil non trouvé'
-            }, status=status.HTTP_404_NOT_FOUND)
+        # Rechercher l'utilisateur par son email (utilisé ici comme user_id)
+        try:
+            user = UserProfile.objects.get(email=user_id)
+        except UserProfile.DoesNotExist:
+            return Response(
+                {"error": f"Utilisateur avec l'email '{user_id}' non trouvé."},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-        # GET: Récupérer les informations de l'appareil
-        if request.method == 'GET':
-            # Récupérer les dernières données
-            latest_data = device_data.first()
+        # Mettre à jour la salle de l'utilisateur
+        user.location = new_location
+        user.save()
 
-            # Préparer les données
-            device_info = {
-                'sensor_id': device_id,
-                'type': latest_data.type,
-                'location': latest_data.location,
-                'last_update': latest_data.timestamp,
-                'status': 'active',
-                'latest_data': {
-                    'value': latest_data.value,
-                    'timestamp': latest_data.timestamp
-                }
+        # Retourner une réponse de succès
+        return Response({
+            "message": "Salle de l'utilisateur mise à jour avec succès.",
+            "user": {
+                "id": str(user.id),
+                "username": user.username,
+                "email": user.email,
+                "location": user.location,
+                "mode": user.mode,
+                "role": user.role
             }
+        }, status=status.HTTP_200_OK)
 
-            # Ajouter des données spécifiques selon le type d'appareil
-            if latest_data.type == 'DHT22':
-                device_info['latest_data']['temperature'] = latest_data.temperature
-                device_info['latest_data']['humidity'] = latest_data.humidity
-            elif latest_data.type == 'PZEM':
-                device_info['latest_data']['voltage'] = latest_data.voltage
-                device_info['latest_data']['current'] = latest_data.current
-                device_info['latest_data']['power'] = latest_data.power
-                device_info['latest_data']['energy'] = latest_data.energy
-            elif latest_data.type == 'PIR':
-                device_info['latest_data']['motion_detected'] = latest_data.motion_detected
+    except Exception as e:
+        # Gestion des erreurs
+        return Response(
+            {"error": f"Erreur serveur : {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
-            return Response({
-                'status': 'success',
-                'device': device_info
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_all_devices_on(request):
+    try:
+        # Récupérer toutes les salles à partir du modèle Salle
+        all_salles = Salle.objects.all()
+        result = []
+
+        for salle in all_salles:
+            # Filtrer les logs pour cette salle et cet appareil
+            devices_on = []
+            for device in ["clim", "chauf", "lamp"]:
+                latest_log = AutomationLog.objects(
+                    location=salle.name,  # 👈 Utilise 'name' au lieu de 'location'
+                    device=device
+                ).order_by('-timestamp').first()
+
+                if latest_log and latest_log.action == f"{device} ON":
+                    devices_on.append({
+                        "device": device,
+                        "status": "ON",
+                        "reason": latest_log.reason,
+                        "timestamp": latest_log.timestamp
+                    })
+
+            # Ajouter les informations de la salle au résultat
+            result.append({
+                "location": salle.name,     # 👈 On utilise toujours 'location' dans l'API pour compatibilité
+                "mode": salle.mode,         # 0: Manuel, 1: Automatique (identique)
+                "devices_on": devices_on
             })
 
-        # PUT: Mettre à jour les informations de l'appareil
-        elif request.method == 'PUT':
-            # Cette partie dépend de votre modèle de données et de vos besoins
-            # Par exemple, vous pourriez vouloir mettre à jour la localisation de l'appareil
-            # ou d'autres métadonnées
-
-            # Pour l'instant, nous allons simplement renvoyer un message d'erreur
-            return Response({
-                'status': 'error',
-                'message': 'La mise à jour des appareils n\'est pas encore implémentée'
-            }, status=status.HTTP_501_NOT_IMPLEMENTED)
-
-    except AdminProfile.DoesNotExist:
         return Response({
-            'status': 'error',
-            'message': 'Vous n\'avez pas les droits d\'administrateur'
-        }, status=status.HTTP_403_FORBIDDEN)
+            "message": "Liste des appareils 'ON' récupérée avec succès.",
+            "data": result
+        }, status=status.HTTP_200_OK)
+
     except Exception as e:
         return Response({
-            'status': 'error',
-            'message': str(e)
+            "error": f"Erreur serveur : {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Autorise tout le monde à accéder à cette vue
+def update_password_by_email(request):
+    try:
+        # Récupérer les données JSON envoyées dans la requête
+        data = request.data
+        email = data.get("email", "").strip()
+        new_password = data.get("new_password", "").strip()
+
+        # Validation des champs
+        if not email:
+            return Response(
+                {"error": "Champ 'email' manquant."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not new_password:
+            return Response(
+                {"error": "Champ 'new_password' manquant."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Rechercher l'utilisateur par son email
+        try:
+            user = UserProfile.objects.get(email=email)
+        except UserProfile.DoesNotExist:
+            return Response(
+                {"error": f"Aucun utilisateur trouvé avec l'email {email}."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Valider la longueur minimale du mot de passe
+        if len(new_password) < 8:
+            return Response(
+                {"error": "Le mot de passe doit contenir au moins 8 caractères."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Mettre à jour le mot de passe de l'utilisateur
+        user.password = make_password(new_password)
+        user.save()
+
+        # Retourner une réponse de succès
+        return Response({
+            "message": "Mot de passe mis à jour avec succès.",
+            "user": {
+                "email": user.email,
+                "username": user.username
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        # Gestion des erreurs
+        return Response(
+            {"error": f"Erreur serveur : {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

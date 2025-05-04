@@ -1,5 +1,8 @@
+
 from django.utils import timezone
-from mongoengine import Document, StringField, EmailField, DateTimeField, BooleanField, IntField
+
+from mongoengine import Document, StringField, EmailField, IntField, BooleanField, DateTimeField, ValidationError
+from django.contrib.auth.hashers import make_password, check_password
 
 
 class UserProfile(Document):
@@ -11,11 +14,15 @@ class UserProfile(Document):
         ('bureau2', 'Bureau 2'),
     ]
 
+    def validate_password(password):
+        if len(password) < 8:
+            raise ValidationError("Le mot de passe doit contenir au moins 8 caractères.")
+
     user_id = StringField(required=True, unique=True)
     username = StringField(required=True, unique=True)
     email = EmailField(required=True, unique=True)
-    password = StringField(required=True)  # Champ pour stocker le mot de passe haché
-    location = StringField(required=True, choices=LOCATION_CHOICES)
+    password = StringField(required=True, validation=validate_password)
+    location = StringField(required=True)
     last_login = DateTimeField()
     mode = IntField(default=0)  # 0: Manuel, 1: Automatique
     date_joined = DateTimeField(default=timezone.now)
@@ -33,6 +40,12 @@ class UserProfile(Document):
 
     def __str__(self):
         return f"{self.username} - {self.location}"
+
+    def set_password(self, raw_password):
+        self.password = make_password(raw_password)
+
+    def check_password(self, raw_password):
+        return check_password(raw_password, self.password)
 
     def update_last_login(self):
         self.last_login = timezone.now()
@@ -79,3 +92,25 @@ class AdminProfile(Document):
         Vérifie si l'administrateur a une permission spécifique
         """
         return self.is_superuser or False
+
+
+class Salle(Document):
+    name = StringField(required=True, unique=True)  # Nom de la salle
+    mode = IntField(default=0)  # 0: Automatique, 1: Manuel
+
+    meta = {
+        'collection': 'salles',
+        'indexes': [
+            {'fields': ['name'], 'unique': True}
+        ]
+    }
+
+    def __str__(self):
+        return f"{self.name} - Mode: {self.mode}"
+
+    def set_mode(self, mode):
+        if mode in [0, 1]:
+            self.mode = mode
+            self.save()
+            return True
+        return False

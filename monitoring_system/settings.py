@@ -55,6 +55,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+
 ]
 
 ROOT_URLCONF = 'monitoring_system.urls'
@@ -152,7 +153,7 @@ REST_FRAMEWORK = {
 
 
 # MQTT Configuration
-MQTT_BROKER = '172.20.10.6'
+MQTT_BROKER = 'localhost'
 MQTT_PORT = 1883
 MQTT_KEEPALIVE = 60
 
@@ -173,3 +174,6 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 
 # Optionnel : autoriser les credentials (tokens, cookies, etc.)
 CORS_ALLOW_CREDENTIALS = True
+MIDDLEWARE += [
+    'django.contrib.sessions.middleware.SessionMiddleware',
+]
