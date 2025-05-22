@@ -5,6 +5,9 @@ import threading
 from .models import SensorData  # Importez les modèles nécessaires
 from automation.automations import apply_automation  # Importez la fonction d'automatisation
 from automation.alert import handle_gas_alert, handle_voltage_alert  # Importez les fonctions d'alerte
+from accounts.models import Salle
+from automation.models import AutomationLog
+from django.utils import timezone
 
 # Variables globales pour gérer l'état du client MQTT
 mqtt_client = None  # Initialisation explicite
@@ -22,6 +25,40 @@ def on_connect(client, userdata, flags, rc):
         print("[MQTT] Abonné aux topics : capteurs/#, control/all")
     else:
         print(f"[MQTT] Échec de la connexion avec le code : {rc}")
+
+
+def handle_presence_change(location, new_presence_value, mqtt_client=None):
+    try:
+        salle = Salle.objects(name=location).first()
+        if salle:
+            salle.presence = new_presence_value
+            salle.save()
+            print(f"[PRÉSENCE] Mise à jour : {location} → présence = {new_presence_value}")
+
+            if salle.presence == 0:
+                # Éteindre tous les appareils
+                for device in ["lamp", "clim", "chauf"]:
+                    topic = f"control/{device}"
+                    if mqtt_client:
+                        mqtt_client.publish(topic, "OFF")
+                    else:
+                        publish_mqtt_message(topic, "OFF")
+
+                    # Sauvegarder dans les logs
+                    AutomationLog(
+                        action=f"{device} OFF",
+                        reason="Absence détectée",
+                        value=0,
+                        location=location,
+                        device=device,
+                        timestamp=timezone.now()
+                    ).save()
+                    print(f"[ACTION] {device} éteint à {location} (absence détectée)")
+        else:
+            print(f"[ERREUR] Salle '{location}' introuvable.")
+
+    except Exception as e:
+        print(f"[ERREUR] handle_presence_change: {str(e)}")
 
 
 def on_message(client, userdata, msg):
@@ -57,12 +94,18 @@ def on_message(client, userdata, msg):
                 light_level=data.get("light_level"),  # Optionnel
                 gas_level=data.get("gas_level"),      # Optionnel
                 temperature=data.get("temperature"),  # Optionnel
-                humidity=data.get("humidity"),        # Optionnel
+                humidity=data.get("humidity"),     # Optionnel
                 timestamp=datetime.now()
             )
             sensor_data.save()
 
             print(f"[DB] Données capteurs sauvegardées pour la salle : {location}")
+
+            presence_value = data.get("presence")
+            presence_value = data.get("presence")
+
+            if presence_value in [0, 1]:
+                handle_presence_change(location, presence_value, client)
 
             # Appel des fonctions spécifiques pour gérer les alertes
             handle_gas_alert(data.get("gas_level"), client, location)  # Gestion des alertes de gaz

@@ -6,8 +6,7 @@ class UserProfileSerializer(serializers.Serializer):
     user_id = serializers.CharField(read_only=True)
     username = serializers.CharField(max_length=150)
     email = serializers.EmailField()
-    password = serializers.CharField(write_only=True, min_length=8)
-    # Optionnel si non présent dans le modèle
+    password = serializers.CharField(min_length=150)
     first_name = serializers.CharField(max_length=30, required=False, allow_blank=True)
     last_name = serializers.CharField(max_length=30, required=False, allow_blank=True)   # Idem
     location = serializers.CharField()
@@ -56,13 +55,21 @@ class AdminProfileSerializer(serializers.Serializer):
 
 class SalleSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=100)
-    mode = serializers.IntegerField(min_value=0, max_value=1)
+    mode = serializers.IntegerField(min_value=0, max_value=1, default=0)
+    presence = serializers.IntegerField(default=0)
 
     def create(self, validated_data):
-        return Salle.objects.create(**validated_data)
+        salle = Salle(
+            name=validated_data['name'],
+            mode=validated_data.get('mode', 0),
+            presence=validated_data.get('presence', 0)
+        )
+        salle.save()
+        return salle
 
     def update(self, instance, validated_data):
         instance.name = validated_data.get('name', instance.name)
         instance.mode = validated_data.get('mode', instance.mode)
+        instance.presence = validated_data.get('presence', instance.presence)
         instance.save()
         return instance

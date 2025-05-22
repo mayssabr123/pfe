@@ -10,8 +10,8 @@ class SensorData(Document):
     power = FloatField()                     # Puissance (W)
     light_level = FloatField()               # Niveau de lumière (optionnel)
     gas_level = FloatField()                 # Niveau de gaz (optionnel)
-    temperature = FloatField()               # Température (optionnel)
-    humidity = FloatField()                  # Humidité (optionnel)
+    temperature = FloatField()
+    humidity = FloatField()              # Température (optionnel)
     timestamp = DateTimeField(default=datetime.utcnow)  # Horodatage
 
 

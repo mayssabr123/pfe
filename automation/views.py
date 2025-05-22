@@ -1,6 +1,6 @@
 # automation/views.py
 
-
+# assure-toi que ces fonctions existent
 from bson import ObjectId  # Pour MongoDB ObjectId
 from rest_framework.permissions import IsAuthenticated  # Assurez-vous que l'utilisateur est authentifié
 # Importez votre modèle AlertLog
@@ -17,17 +17,17 @@ from rest_framework import status
 @permission_classes([AllowAny])
 def get_sensor_data(request):
     try:
-        # Nombre d'entrées à récupérer (paramètre optionnel ?limit=10)
+        # Paramètres GET
         limit = int(request.GET.get('limit', 100))
         location = request.GET.get('location', 'salle1')
 
-        # Récupérer les données les plus récentes, en tri décroissant
-        queryset = SensorData.objects().order_by('-timestamp').limit(limit)
+        # Filtrer par location et trier par date décroissante
+        queryset = SensorData.objects(location=location).order_by('-timestamp').limit(limit)
 
-        # Convertir en liste pour les trier ensuite dans l'ordre chronologique
-        data = list(queryset)[::-1]  # Tri croissant pour un graphe dans l'ordre du temps
+        # Trier en ordre chronologique (croissant) pour les graphes
+        data = list(queryset)[::-1]
 
-        # Sérialisationz
+        # Sérialisation
         serializer = SensorDataSerializer(data, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

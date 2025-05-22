@@ -96,7 +96,8 @@ class AdminProfile(Document):
 
 class Salle(Document):
     name = StringField(required=True, unique=True)  # Nom de la salle
-    mode = IntField(default=0)  # 0: Automatique, 1: Manuel
+    mode = IntField(default=0)                      # 0: Automatique, 1: Manuel
+    presence = IntField(default=0)                  # 0: Absente, 1: Présente
 
     meta = {
         'collection': 'salles',
@@ -106,11 +107,24 @@ class Salle(Document):
     }
 
     def __str__(self):
-        return f"{self.name} - Mode: {self.mode}"
+        return f"{self.name} - Mode: {self.mode} - Présence: {self.presence}"
 
     def set_mode(self, mode):
+        """
+        Change le mode de fonctionnement de la salle (0: Auto, 1: Manuel)
+        """
         if mode in [0, 1]:
             self.mode = mode
+            self.save()
+            return True
+        return False
+
+    def update_presence(self, value):
+        """
+        Met à jour la présence détectée (0 ou 1) et enregistre en base.
+        """
+        if value in [0, 1]:
+            self.presence = value
             self.save()
             return True
         return False

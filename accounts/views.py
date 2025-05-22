@@ -144,7 +144,6 @@ def register(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
-@parser_classes([JSONParser, FormParser, MultiPartParser])
 def login_view(request):
     try:
         if request.content_type == 'application/json':
@@ -479,6 +478,108 @@ def update_password_by_email(request):
                 "email": user.email,
                 "username": user.username
             }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        # Gestion des erreurs
+        return Response(
+            {"error": f"Erreur serveur : {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Autorise tout le monde à accéder à cette vue
+def update_user_by_email(request):
+    try:
+        # Récupérer les données JSON envoyées dans la requête
+        data = request.data
+        email = data.get("email", "").strip()
+        new_username = data.get("new_username", "").strip()
+        new_location = data.get("new_location", "").strip()
+        new_mode = data.get("new_mode")  # 0: Manuel, 1: Automatique
+
+        # Validation des champs obligatoires
+        if not email:
+            return Response(
+                {"error": "Champ 'email' manquant."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Rechercher l'utilisateur par son email
+        try:
+            user = UserProfile.objects.get(email=email)
+        except UserProfile.DoesNotExist:
+            return Response(
+                {"error": f"Aucun utilisateur trouvé avec l'email {email}."})
+
+        # Mettre à jour les champs si fournis
+        if new_username:
+            user.username = new_username
+
+        if new_location:
+            user.location = new_location
+
+        if new_mode is not None:  # Vérifier si le mode est fourni
+            if new_mode in [0, 1]:  # Valider que le mode est valide
+                user.mode = new_mode
+            else:
+                return Response(
+                    {"error": "Mode invalide. Doit être 0 (manuel) ou 1 (automatique)."})
+
+        # Sauvegarder les modifications
+        user.save()
+
+        # Retourner une réponse de succès
+        return Response({
+            "message": "Informations de l'utilisateur mises à jour avec succès.",
+            "user": {
+                "email": user.email,
+                "username": user.username,
+                "location": user.location,
+                "mode": user.mode,
+                "role": user.role
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        # Gestion des erreurs
+        return Response(
+            {"error": f"Erreur serveur : {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([AllowAny])  # Autorise tout le monde à accéder à cette vue
+def delete_user_by_email(request):
+    try:
+        # Récupérer les données JSON envoyées dans la requête
+        data = request.data
+        email = data.get("email", "").strip()
+
+        # Validation des champs obligatoires
+        if not email:
+            return Response(
+                {"error": "Champ 'email' manquant."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Rechercher l'utilisateur par son email
+        try:
+            user = UserProfile.objects.get(email=email)
+        except UserProfile.DoesNotExist:
+            return Response(
+                {"error": f"Aucun utilisateur trouvé avec l'email {email}."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Supprimer l'utilisateur
+        user.delete()
+
+        # Retourner une réponse de succès
+        return Response({
+            "message": f"Utilisateur avec l'email {email} a été supprimé avec succès."
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
